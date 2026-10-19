@@ -14381,6 +14381,61 @@ mod admin_rotation_history {
         }
         assert_eq!(total, 7);
     }
+
+    #[test]
+    fn history_past_limit_returns_surviving_window() {
+        // Regression test for #1337: with more than MAX_ADMIN_ROTATION_LOG entries,
+        // the old code computed rotation IDs beyond count and unwrapped a missing
+        // entry, trapping. With 105 rotations, the surviving window is IDs 6..=105.
+        let (env, client, _admin) = setup();
+        let mut last_admin = Address::generate(&env);
+        for _ in 0..(MAX_ADMIN_ROTATION_LOG + 5) {
+            let next = Address::generate(&env);
+            client.propose_admin_rotation(&next);
+            client.accept_admin_rotation(&next);
+            last_admin = next;
+        }
+
+        // Page 1: start=0, limit=20 → entries 6..=25 (20 entries)
+        let (entries, next) = client.get_admin_rotation_history_page(&0, &20);
+        assert_eq!(entries.len(), 20);
+        assert_eq!(next, Some(20));
+
+        // Exhaustively page through all surviving entries with limit=20.
+        let mut cursor: Option<u32> = Some(0);
+        let mut total = 0u32;
+        while let Some(start) = cursor {
+            let (entries, next) = client.get_admin_rotation_history_page(&start, &20);
+            total += entries.len() as u32;
+            cursor = next;
+        }
+        assert_eq!(total, MAX_ADMIN_ROTATION_LOG);
+        // Last page must return None.
+        let (last_page, last_next) = client.get_admin_rotation_history_page(&80, &20);
+        assert_eq!(last_page.len(), 20);
+        assert_eq!(last_next, None);
+    }
+
+    #[test]
+    fn history_count_under_limit_behaviour_unchanged() {
+        // With count <= MAX_ADMIN_ROTATION_LOG, pagination must behave exactly as
+        // before the fix (no eviction, IDs start at 1).
+        let (env, client, _admin) = setup();
+        for i in 0..50u32 {
+            let next = Address::generate(&env);
+            client.propose_admin_rotation(&next);
+            client.accept_admin_rotation(&next);
+        }
+
+        let (entries, next) = client.get_admin_rotation_history_page(&0, &50);
+        assert_eq!(entries.len(), 50);
+        assert_eq!(next, None);
+
+        // Offset page still works.
+        let (entries2, next2) = client.get_admin_rotation_history_page(&10, &10);
+        assert_eq!(entries2.len(), 10);
+        assert_eq!(next2, None);
+    }
 }
 
 // ── Share-sum adversarial tests (#299) ────────────────────────────────────────
