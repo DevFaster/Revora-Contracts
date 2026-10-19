@@ -7,6 +7,11 @@ edition = "2021"
 # Issue #465: Kani bounded verification harness (not enabled in default CI).
 kani = []
 
+# Issue #1356: Testnet-only tooling entrypoints (faucet, indexer fixture, simulation).
+# Off by default — production/release builds exclude these to reduce wasm size and
+# narrow the mainnet attack surface. Enable with `--features testnet`.
+testnet = []
+
 # `kani` is a cfg set by the Kani verifier (not a Cargo feature), so declare it as a
 # known cfg to keep `unexpected_cfgs` quiet under `clippy --all-features -D warnings`.
 [package.metadata.kani]
