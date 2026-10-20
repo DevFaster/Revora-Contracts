@@ -1885,7 +1885,15 @@ version = "0.1.0"
 dependencies = [
  "derive_arbitrary",
  "proptest",
+ "revora-vesting",
  "serde_json",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "revora-vesting"
+version = "0.1.0"
+dependencies = [
  "soroban-sdk",
 ]
 
