@@ -1891,6 +1891,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "revora-governance"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "revora-indexer"
 version = "0.1.0"
 dependencies = [
