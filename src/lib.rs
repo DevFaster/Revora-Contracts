@@ -13103,17 +13103,28 @@ impl RevoraRevenueShare {
         // Compute the first surviving rotation ID (evicted entries are skipped).
         let first_surviving: u64 =
             if count > MAX_ADMIN_ROTATION_LOG { count - MAX_ADMIN_ROTATION_LOG + 1 } else { 1 };
-        let end = core::cmp::min(start as u64 + effective_limit as u64, count);
+        // Page only over surviving (non-evicted) entries. The log keeps at most
+        // MAX_ADMIN_ROTATION_LOG entries; the oldest are evicted FIFO. Paging over
+        // the full count while offsetting by first_surviving used to compute rotation
+        // IDs beyond count and unwrap() a missing entry, trapping once count > 100.
+        let surviving = core::cmp::min(count, MAX_ADMIN_ROTATION_LOG);
+        if start as u64 >= surviving {
+            return (Vec::new(&env), None);
+        }
+        let end = core::cmp::min(start as u64 + effective_limit as u64, surviving);
         let mut results = Vec::new(&env);
 
         for i in start as u64..end {
             let rotation_id = first_surviving + i;
             let log_key = DataKey2::AdminRotationLog(rotation_id);
-            let entry: AdminRotationEntry = env.storage().persistent().get(&log_key).unwrap();
-            results.push_back(entry);
+            if let Some(entry) =
+                env.storage().persistent().get::<DataKey2, AdminRotationEntry>(&log_key)
+            {
+                results.push_back(entry);
+            }
         }
 
-        let next_cursor = if end < count { Some(end as u32) } else { None };
+        let next_cursor = if end < surviving { Some(end as u32) } else { None };
         (results, next_cursor)
     }
 
