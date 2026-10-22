@@ -402,6 +402,8 @@ mod test_compute_share_invariants;
 #[cfg(test)]
 mod test_duplicates;
 #[cfg(test)]
+mod test_snapshot_shares_accounting;
+#[cfg(test)]
 mod test_epoch_boundary_report;
 #[cfg(test)]
 mod test_estimate_transfer;
@@ -9285,8 +9287,6 @@ impl RevoraRevenueShare {
             )?;
         }
 
-        let mut added_bps: u32 = 0;
-
         // Maintain per-offering running total and validate aggregate cap.
         let total_key = DataKey::HolderShareTotal(offering_id.clone());
         let mut current_total: u32 = env.storage().persistent().get(&total_key).unwrap_or(0);
@@ -9307,21 +9307,41 @@ impl RevoraRevenueShare {
         } else {
             0
         };
-        let mut temp_deltas: Vec<(Address, i128)> = Vec::new(&env);
-
-        // First pass: calculate deltas and check cap
-        if max_shares > 0 {
-            for i in 0..batch_len {
-                let (holder, share_bps) = holders.get(i).unwrap();
-                let old_share: u32 = env
-                    .storage()
-                    .persistent()
-                    .get(&DataKey::HolderShare(offering_id.clone(), holder.clone()))
-                    .unwrap_or(0);
-                let delta = (share_bps as i128) - (old_share as i128);
-                temp_total_shares = temp_total_shares.saturating_add(delta);
-                temp_deltas.push_back((holder.clone(), delta));
+        // First pass (always): reject duplicate holders and compute deltas BEFORE any write.
+        let mut seen_holders: Vec<Address> = Vec::new(&env);
+        let mut share_delta_sum: i128 = 0;
+        let mut slot_bps_delta: i128 = 0;
+        for i in 0..batch_len {
+            let (holder, share_bps) = holders.get(i).unwrap();
+            if seen_holders.contains(&holder) {
+                return Err(RevoraError::InvalidShareBps);
             }
+            seen_holders.push_back(holder.clone());
+
+            let old_share: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::HolderShare(offering_id.clone(), holder.clone()))
+                .unwrap_or(0);
+            share_delta_sum = share_delta_sum.saturating_add((share_bps as i128) - (old_share as i128));
+
+            let slot = start_index.saturating_add(i);
+            let prev_slot_bps: u32 = env
+                .storage()
+                .persistent()
+                .get::<_, (Address, u32)>(&DataKey::SnapshotHolder(
+                    offering_id.clone(),
+                    snapshot_ref,
+                    slot,
+                ))
+                .map(|(_, b)| b)
+                .unwrap_or(0);
+            slot_bps_delta =
+                slot_bps_delta.saturating_add((share_bps as i128) - (prev_slot_bps as i128));
+        }
+
+        if max_shares > 0 {
+            temp_total_shares = temp_total_shares.saturating_add(share_delta_sum);
             if temp_total_shares > max_shares {
                 return Err(RevoraError::MaxTotalSupplySharesExceeded);
             }
@@ -9380,7 +9400,6 @@ impl RevoraRevenueShare {
             Self::record_holder_share_transition(&env, &offering_id, &holder, old_share, share_bps);
 
             current_total = new_total;
-            added_bps = added_bps.saturating_add(share_bps);
         }
 
         // Update total shares issued
@@ -9389,23 +9408,13 @@ impl RevoraRevenueShare {
                 .persistent()
                 .set(&DataKey3::TotalSharesIssued(offering_id.clone()), &temp_total_shares);
         } else {
-            // If no cap, still track total shares
-            let mut total_shares: i128 = env
+            // No cap: apply the delta computed before any HolderShare overwrite.
+            let existing: i128 = env
                 .storage()
                 .persistent()
                 .get(&DataKey3::TotalSharesIssued(offering_id.clone()))
                 .unwrap_or(0);
-            for i in 0..batch_len {
-                let (holder, share_bps) = holders.get(i).unwrap();
-                let old_share: u32 = env
-                    .storage()
-                    .persistent()
-                    .get(&DataKey::HolderShare(offering_id.clone(), holder.clone()))
-                    .unwrap_or(0);
-                total_shares = total_shares
-                    .saturating_sub(old_share as i128)
-                    .saturating_add(share_bps as i128);
-            }
+            let total_shares = existing.saturating_add(share_delta_sum);
             env.storage()
                 .persistent()
                 .set(&DataKey3::TotalSharesIssued(offering_id.clone()), &total_shares);
@@ -9415,7 +9424,8 @@ impl RevoraRevenueShare {
         if slot_count > entry.holder_count {
             entry.holder_count = slot_count;
         }
-        let new_total_bps = entry.total_bps.saturating_add(added_bps);
+        // total_bps is the sum of current slot values: add new, subtract overwritten.
+        let new_total_bps = (entry.total_bps as i128).saturating_add(slot_bps_delta).max(0) as u32;
         entry.total_bps = new_total_bps;
         env.storage().persistent().set(&entry_key, &entry);
         env.storage()
