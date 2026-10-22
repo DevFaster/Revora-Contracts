@@ -8072,7 +8072,7 @@ fn multisig_setup() -> (Env, RevoraRevenueShareClient<'static>, Address, Address
     owners.push_back(owner3.clone());
 
     // 2-of-3 threshold with 86400s (1 day) duration
-    client.init_multisig(&caller, &owners, &2, &86400);
+    client.init_multisig(&caller, &owners, &2, &86400, &5100);
 
     (env, client, owner1, owner2, owner3, caller)
 }
@@ -8095,7 +8095,7 @@ fn multisig_init_twice_fails() {
 
     let mut owners2 = Vec::new(&env);
     owners2.push_back(owner1.clone());
-    let r = client.try_init_multisig(&caller, &owners2, &1, &86400);
+    let r = client.try_init_multisig(&caller, &owners2, &1, &86400, &5100);
     assert!(r.is_err());
 }
 
@@ -8112,7 +8112,7 @@ fn multisig_init_zero_threshold_fails() {
 
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
-    let r = client.try_init_multisig(&caller, &owners, &0, &86400);
+    let r = client.try_init_multisig(&caller, &owners, &0, &86400, &5100);
     assert!(r.is_err());
 }
 
@@ -8130,7 +8130,7 @@ fn multisig_init_threshold_exceeds_owners_fails() {
     let mut owners = Vec::new(&env);
     owners.push_back(owner.clone());
     // threshold=2 but only 1 owner
-    let r = client.try_init_multisig(&caller, &owners, &2, &86400);
+    let r = client.try_init_multisig(&caller, &owners, &2, &86400, &5100);
     assert!(r.is_err());
 }
 
@@ -8143,7 +8143,7 @@ fn multisig_init_empty_owners_fails() {
     let issuer = caller.clone();
 
     let owners = Vec::new(&env);
-    let r = client.try_init_multisig(&caller, &owners, &1, &86400);
+    let r = client.try_init_multisig(&caller, &owners, &1, &86400, &5100);
     assert!(r.is_err());
 }
 
@@ -8158,7 +8158,7 @@ fn multisig_init_zero_duration_fails() {
     let mut owners = Vec::new(&env);
     owners.push_back(Address::generate(&env));
     // duration=0 should fail
-    let r = client.try_init_multisig(&caller, &owners, &1, &0);
+    let r = client.try_init_multisig(&caller, &owners, &1, &0, &5100);
     assert!(r.is_err());
 }
 
@@ -8174,7 +8174,7 @@ fn multisig_init_duration_exceeds_max_fails() {
     owners.push_back(Address::generate(&env));
     // duration > 365 days (31,536,000 seconds) should fail
     let excessive_duration = 365 * 24 * 60 * 60 + 1; // 31,536,001 seconds
-    let r = client.try_init_multisig(&caller, &owners, &1, &excessive_duration);
+    let r = client.try_init_multisig(&caller, &owners, &1, &excessive_duration, &5100);
     assert!(r.is_err());
 }
 
@@ -8191,7 +8191,7 @@ fn multisig_init_valid_duration_succeeds() {
     owners.push_back(owner1.clone());
 
     // duration=86400 (1 day) should succeed
-    client.init_multisig(&caller, &owners, &1, &86400);
+    client.init_multisig(&caller, &owners, &1, &86400, &5100);
     assert_eq!(client.get_multisig_threshold(), Some(1));
 
     // Verify we can propose an action (which requires duration to be set)
@@ -8214,7 +8214,7 @@ fn multisig_init_max_owners_succeeds() {
     }
 
     // threshold=11 (majority), duration=86400
-    client.init_multisig(&caller, &owners, &11, &86400);
+    client.init_multisig(&caller, &owners, &11, &86400, &5100);
     assert_eq!(client.get_multisig_threshold(), Some(11));
     assert_eq!(client.get_multisig_owners().len(), 20);
 }
@@ -8233,7 +8233,7 @@ fn multisig_init_exceeds_max_owners_fails() {
         owners.push_back(Address::generate(&env));
     }
 
-    let r = client.try_init_multisig(&caller, &owners, &11, &86400);
+    let r = client.try_init_multisig(&caller, &owners, &11, &86400, &5100);
     assert!(r.is_err());
 }
 
@@ -8254,7 +8254,7 @@ fn multisig_init_threshold_equals_owners_succeeds() {
     owners.push_back(owner2.clone());
     owners.push_back(owner3.clone());
 
-    client.init_multisig(&caller, &owners, &3, &86400);
+    client.init_multisig(&caller, &owners, &3, &86400, &5100);
     assert_eq!(client.get_multisig_threshold(), Some(3));
     assert_eq!(client.get_multisig_owners().len(), 3);
 }
@@ -8273,7 +8273,7 @@ fn multisig_init_threshold_one_succeeds() {
         owners.push_back(Address::generate(&env));
     }
 
-    client.init_multisig(&caller, &owners, &1, &86400);
+    client.init_multisig(&caller, &owners, &1, &86400, &5100);
     assert_eq!(client.get_multisig_threshold(), Some(1));
     assert_eq!(client.get_multisig_owners().len(), 5);
 }
@@ -8294,7 +8294,7 @@ fn multisig_init_duplicate_owners_fails() {
     owners.push_back(owner2.clone());
     owners.push_back(owner1.clone()); // duplicate
 
-    let r = client.try_init_multisig(&caller, &owners, &2, &86400);
+    let r = client.try_init_multisig(&caller, &owners, &2, &86400, &5100);
     assert!(r.is_err());
 }
 
@@ -8315,7 +8315,7 @@ fn multisig_init_then_propose_works() {
 
     // Initialize with 7-day duration
     let duration = 7 * 24 * 60 * 60; // 7 days
-    client.init_multisig(&caller, &owners, &2, &duration);
+    client.init_multisig(&caller, &owners, &2, &duration, &5100);
 
     // Verify initialization
     assert_eq!(client.get_multisig_threshold(), Some(2));
@@ -8558,7 +8558,7 @@ fn multisig_threshold_one_executes_with_proposer_only() {
     owners.push_back(owner1.clone());
     owners.push_back(owner2.clone());
 
-    client.init_multisig(&caller, &owners, &1, &86400);
+    client.init_multisig(&caller, &owners, &1, &86400, &5100);
 
     let proposal_id = client.propose_action(&owner1, &ProposalAction::Freeze);
     client.execute_action(&proposal_id);
@@ -10191,7 +10191,7 @@ proptest! {
         owners.push_back(owner2.clone());
         owners.push_back(owner3.clone());
 
-        client.init_multisig(&caller, &owners, &2);
+        client.init_multisig(&caller, &owners, &2, &86400, &5100);
 
         let p1 = client.propose_action(&owner1, &ProposalAction::Freeze);
         // Below threshold → fail
