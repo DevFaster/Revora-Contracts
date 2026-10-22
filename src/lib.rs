@@ -431,9 +431,11 @@ mod test_compute_share_decomposition_prop;
 #[cfg(test)]
 mod test_disclosure;
 #[cfg(test)]
+#[cfg(feature = "testnet")]
 mod test_faucet_metrics;
 /// Self-test module providing a `self_test()` entrypoint that runs contract-internal
 #[cfg(test)]
+#[cfg(feature = "testnet")]
 mod test_faucet_seed;
 #[cfg(test)]
 mod test_freeze_reason_bitmask;
@@ -617,6 +619,10 @@ const EVENT_PROPOSAL_CREATED: Symbol = symbol_short!("prop_new");
 const MAX_ORACLE_CHAIN_LEN: u32 = 10;
 /// Maximum number of admin rotation log entries kept (FIFO eviction).
 const MAX_ADMIN_ROTATION_LOG: u64 = 100;
+/// Maximum number of faucet seed slots a single `faucet_seed_holders` call may
+/// request. Prevents unbounded loops and excessive storage writes from a
+/// caller-supplied `count` (testnet-only entrypoint).
+const MAX_FAUCET_SEED_COUNT: u32 = 1_000;
 /// Default class priority for classes without an explicit index.
 const DEFAULT_CLASS_PRIORITY: u32 = 0;
 /// Faucet metrics aggregation window in seconds.
@@ -14135,9 +14141,15 @@ impl RevoraRevenueShare {
     pub fn get_multisig_threshold(env: &Env) -> Option<u32> {
         env.storage().persistent().get(&DataKey3::MultisigThreshold)
     }
+} // end impl RevoraRevenueShare (plain)
 
-    // ── Testnet faucet ────────────────────────────────────────────────────────
-
+// ─── Issue #1356: testnet-only entrypoints ─────────────────────────────────
+// faucet_seed_holders, faucet_reset, and get_indexer_fixture_topics are compiled
+// only when the `testnet` Cargo feature is enabled. Production builds exclude
+// them to reduce wasm size and narrow the mainnet attack surface.
+#[cfg(feature = "testnet")]
+#[contractimpl]
+impl RevoraRevenueShare {
     /// Allocate `count` deterministic holder seed slots for an offering.
     ///
     /// Each seed is derived as `sha256(issuer_xdr || namespace_xdr || token_xdr || idx_xdr)`
@@ -14155,8 +14167,10 @@ impl RevoraRevenueShare {
     ///   only update counters; they do **not** re-emit the event.
     ///
     /// ### Security
-    /// Panics (via `RevoraError::TestnetOnly`) when `testnet_mode == false`.
-    /// Must never be callable on mainnet.
+    /// - Requires `requester.require_auth()` — the caller must authorize themselves.
+    /// - `count` is capped at `MAX_FAUCET_SEED_COUNT` (1_000); above → `LimitReached`.
+    /// - Panics (via `RevoraError::TestnetOnly`) when `testnet_mode == false`.
+    ///   Must never be callable on mainnet.
     ///
     /// ### Parameters
     /// - `issuer` / `namespace` / `token`: offering identity.
@@ -14174,6 +14188,14 @@ impl RevoraRevenueShare {
     ) -> Result<Vec<BytesN<32>>, RevoraError> {
         if !Self::is_testnet_mode(env.clone()) {
             return Err(RevoraError::TestnetOnly);
+        }
+
+        // Authenticate the requester so one address cannot reset another's cooldown.
+        requester.require_auth();
+
+        // Cap caller-supplied count to prevent unbounded loops / storage writes.
+        if count > MAX_FAUCET_SEED_COUNT {
+            return Err(RevoraError::LimitReached);
         }
 
         let offering_id = OfferingId {
@@ -14392,7 +14414,309 @@ impl RevoraRevenueShare {
 
         Ok(())
     }
-} // end impl RevoraRevenueShare (plain)
+
+    /// Returns canonical fixture topics for indexer schema bootstrapping.
+    ///
+    /// Returns a pair `(v2_fixtures, v3_fixtures)` where each Vec has the same
+    /// length and stable ordering. Off-chain indexers can subscribe to these
+    /// known topic symbols to ensure their parser correctly deserializes every
+    /// event type the contract emits.
+    ///
+    /// The `period_id` parameter is used for period-scoped event types (e.g.
+    /// `rv_init`, `rv_rep`). Non-period-scoped events (e.g. `offer`, `claim`,
+    /// `ms_init`, `rg_lim_d`) always carry `period_id = 0`.
+    pub fn get_indexer_fixture_topics(
+        env: Env,
+        issuer: Address,
+        namespace: Symbol,
+        token: Address,
+        period_id: u64,
+    ) -> (Vec<EventIndexTopicV2>, Vec<EventIndexTopicV3>) {
+        let v2_fixtures: Vec<EventIndexTopicV2> = soroban_sdk::vec![
+            &env,
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("offer"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("rv_init"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("rv_ovr"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("rv_rej"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("rv_rep"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("claim"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("admin_set"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("fee_set"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("fee_ast"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("fee_off"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("conc_lim"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("rnd_mode"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("meta_key"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("meta_del"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+            },
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("ms_init"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+            },
+            // ── Regulatory-limit delta (reg_limit_delta event stream) ──
+            EventIndexTopicV2 {
+                version: EVENT_SCHEMA_VERSION_V2,
+                event_type: symbol_short!("rg_lim_d"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+            },
+        ];
+
+        let v3_fixtures: Vec<EventIndexTopicV3> = soroban_sdk::vec![
+            &env,
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("offer"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("rv_init"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("rv_ovr"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("rv_rej"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("rv_rep"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("claim"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("admin_set"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("fee_set"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("fee_ast"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("fee_off"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("conc_lim"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("rnd_mode"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("meta_key"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("meta_del"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+                _reserved: 0,
+            },
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("ms_init"),
+                issuer: issuer.clone(),
+                namespace: namespace.clone(),
+                token: token.clone(),
+                period_id: 0,
+                _reserved: 0,
+            },
+            // ── Regulatory-limit delta (reg_limit_delta event stream) ──
+            EventIndexTopicV3 {
+                version: INDEXER_EVENT_SCHEMA_VERSION,
+                event_type: symbol_short!("rg_lim_d"),
+                issuer: issuer.clone(),
+                namespace,
+                token,
+                period_id: 0,
+                _reserved: 0,
+            },
+        ];
+
+        (v2_fixtures, v3_fixtures)
+    }
+} // end impl RevoraRevenueShare (testnet)
 
 #[cfg(test)]
 mod issue_455_fx_oracle_tests {
@@ -16025,314 +16349,8 @@ impl RevoraRevenueShare {
         namespace: Symbol,
         token: Address,
     ) -> i128 {
-        let offering_id = OfferingId { issuer, namespace, token };
-        env.storage().persistent().get(&DataKey2::DepositedRevenue(offering_id)).unwrap_or(0)
-    }
-
-    // ── Indexer fixture topics ────────────────────────────────────────────────────
-
-    // ── Indexer fixture topics ────────────────────────────────────────────────────
-
-    /// Returns canonical fixture topics for indexer schema bootstrapping.
-    ///
-    /// Returns a pair `(v2_fixtures, v3_fixtures)` where each Vec has the same
-    /// length and stable ordering. Off-chain indexers can subscribe to these
-    /// known topic symbols to ensure their parser correctly deserializes every
-    /// event type the contract emits.
-    ///
-    /// The `period_id` parameter is used for period-scoped event types (e.g.
-    /// `rv_init`, `rv_rep`). Non-period-scoped events (e.g. `offer`, `claim`,
-    /// `ms_init`, `rg_lim_d`) always carry `period_id = 0`.
-    pub fn get_indexer_fixture_topics(
-        env: Env,
-        issuer: Address,
-        namespace: Symbol,
-        token: Address,
-        period_id: u64,
-    ) -> (Vec<EventIndexTopicV2>, Vec<EventIndexTopicV3>) {
-        let v2_fixtures: Vec<EventIndexTopicV2> = soroban_sdk::vec![
-            &env,
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("offer"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("rv_init"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("rv_ovr"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("rv_rej"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("rv_rep"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("claim"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("admin_set"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("fee_set"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("fee_ast"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("fee_off"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("conc_lim"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("rnd_mode"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("meta_key"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("meta_del"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-            },
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("ms_init"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-            },
-            // ── Regulatory-limit delta (reg_limit_delta event stream) ──
-            EventIndexTopicV2 {
-                version: EVENT_SCHEMA_VERSION_V2,
-                event_type: symbol_short!("rg_lim_d"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-            },
-        ];
-
-        let v3_fixtures: Vec<EventIndexTopicV3> = soroban_sdk::vec![
-            &env,
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("offer"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("rv_init"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("rv_ovr"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("rv_rej"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("rv_rep"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("claim"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("admin_set"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("fee_set"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("fee_ast"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("fee_off"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("conc_lim"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("rnd_mode"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("meta_key"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("meta_del"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-                _reserved: 0,
-            },
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("ms_init"),
-                issuer: issuer.clone(),
-                namespace: namespace.clone(),
-                token: token.clone(),
-                period_id: 0,
-                _reserved: 0,
-            },
-            // ── Regulatory-limit delta (reg_limit_delta event stream) ──
-            EventIndexTopicV3 {
-                version: INDEXER_EVENT_SCHEMA_VERSION,
-                event_type: symbol_short!("rg_lim_d"),
-                issuer: issuer.clone(),
-                namespace,
-                token,
-                period_id: 0,
-                _reserved: 0,
-            },
-        ];
-
-        (v2_fixtures, v3_fixtures)
+    let offering_id = OfferingId { issuer, namespace, token };
+    env.storage().persistent().get(&DataKey2::DepositedRevenue(offering_id)).unwrap_or(0)
     }
 }
 
