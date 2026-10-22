@@ -5226,7 +5226,21 @@ impl RevoraRevenueShare {
         Ok(())
     }
 
-    // â”€â”€ Offering management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    /// Helper: block only when the contract is HardPaused. Claim and other
+    /// holder outflows remain allowed under SoftPaused per the pause tier docs.
+    fn require_not_hard_paused(env: &Env) -> Result<(), RevoraError> {
+        let state = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PauseState>(&DataKey::Paused)
+            .unwrap_or(PauseState::NotPaused);
+        if state == PauseState::HardPaused {
+            return Err(RevoraError::ContractPaused);
+        }
+        Ok(())
+    }
+
+    // â”€â”€ Offering management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Register a new revenue-share offering.
     ///
@@ -10264,8 +10278,22 @@ impl RevoraRevenueShare {
             symbol_short!("claim"),
         )?;
 
-        // #1312: pay each period at the share held during that period, walking the
-        // per-holder HolderShareSchedule (the same helper used by get_claimable).
+        let share_bps = Self::get_holder_share(
+            env.clone(),
+            offering_id.issuer.clone(),
+            offering_id.namespace.clone(),
+            offering_id.token.clone(),
+            holder.clone(),
+        );
+        if share_bps == 0 {
+            return Err(RevoraError::NoPendingClaims);
+        }
+
+        // #1313: HardPaused blocks every state-mutating outflow including claim;
+        // SoftPaused still permits claims. Global freeze blocks all outflows.
+        Self::require_not_hard_paused(&env)?;
+        Self::require_not_frozen(&env)?;
+
         Self::require_claim_window_open(&env, &offering_id)?;
 
         let count_key = DataKey::PeriodCount(offering_id.clone());
@@ -11953,7 +11981,7 @@ impl RevoraRevenueShare {
         amount: i128,
     ) -> Result<i128, RevoraError> {
         Self::require_not_frozen(&env)?;
-        Self::require_not_paused(&env)?;
+        Self::require_not_hard_paused(&env)?;
         issuer.require_auth();
 
         let offering_id = OfferingId {
@@ -16266,7 +16294,7 @@ impl RevoraRevenueShare {
 }
 
 #[cfg(test)]
-mod test_issue_1312;
+mod test_issue_1313;
 
 #[cfg(test)]
 mod test_deferred_priority;
